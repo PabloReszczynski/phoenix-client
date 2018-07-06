@@ -1,11 +1,10 @@
 (ns phoenix-client.core
   (:require [phoenix-client.socket :as socket]
             [phoenix-client.channel :as channel]
-            [phoenix-client.push :as push]))
+            [phoenix-client.push :as push]
+            [phoenix-client.websocket :as ws]))
 
-
-(def socket-server
-  "http://localhost:4000/socket")
+(def socket-server "ws://phoenixchat.herokuapp.com/ws")
 
 (defn receive-message [value]
   (prn value))
@@ -14,11 +13,14 @@
 
 (defn init-phx-socket []
   (->> soo
-       (socket/on "new:msg" "rooms:lobby" receive-message)))
+       (socket/join (channel/make-channel "rooms:lobby"))
+       (socket/listen receive-message)))
 
 (comment
   (defn emit [{:keys [path ref]} event channel payload]
     (send-message path (make-message event channel payload ref))))
 
 (socket/emit soo "new:msg" "rooms:lobby" {:user "pablo" :body "caca"})
+(socket/join-channel (channel/make-channel "rooms:lobby") soo)
 
+(init-phx-socket)

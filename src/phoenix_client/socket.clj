@@ -29,17 +29,21 @@
    :ref 0
    :heartbeat-interval-seconds 30})
 
-(defn send-message [path message]
+(defn send-message! [path message]
   (ws/emit path (encode-message message)))
 
-(defn emit [{:keys [endpoint ref]} event channel payload]
-  (send-message endpoint (make-message event channel payload ref)))
+(defn emit! [{:keys [endpoint ref]} event channel payload]
+  (send-message! endpoint (make-message event channel payload ref)))
 
 (defn push [pusheable socket]
-  (-> socket
-      (update-in [:pushes] assoc (:ref socket) pusheable)
-      (update-in [:ref] inc)
-      (emit (:event pusheable) (:channel pusheable) (:payload pusheable))))
+  (let [socket (-> socket
+                  (update-in [:pushes] assoc (:ref socket) pusheable)
+                  (update-in [:ref] inc))]
+     (emit! socket
+            (:event pusheable)
+            (:channel pusheable)
+            (:payload pusheable))
+     socket))
 
 (defn on-channel-errored [channel-name socket]
   [(update-in socket [:channels channel-name] assoc :state :errored)
@@ -77,7 +81,8 @@
          :else [socket nil]))
 
 (defn join-channel [channel socket]
-  (let [pusheable (make-push (:name channel)
+  (let [pusheable (make-push "phx_join"
+                             (:name channel)
                              (:payload channel)
                              (:on-join channel)
                              (:on-join-error channel))
@@ -116,15 +121,24 @@
   (update-in socket [:events] dissoc [event-name channel-name]))
 
 (defn phoenix-messages [socket]
-  (ws/listen (:path socket) decode-message))
+  @(ws/listen (:endpoint socket) decode-message))
 
 (defn heartbeat-sub [socket]
   (every (* 1000 (:heartbeat-interval-seconds socket))
          heartbeat
          timer-pool))
 
-;; TODO
-(defn handle-internal-reply [socket message])
+(defn handle-internal-reply [socket message]
+  (let [status (get-in message [:payload :status])
+        ref (:ref message)
+        topic (:topic message)
+        channel (get-in socket [:channels topic])]
+    (if (= status "ok")
+      (cond
+        (= ref (:join-ref channel)) {:type :channel-joined :content topic}
+        (= ref (:leave-ref channel)) {:type :channel-closed :content topic}
+        :else {:type :no-op})
+      {:type :no-op})))
 
 (defn map-internal-msgs [socket msg]
   (if (nil? msg)
@@ -139,8 +153,17 @@
 (defn internal-msgs [socket]
   (map (partial map-internal-msgs socket) (phoenix-messages socket)))
 
-;; TODO
-(defn handle-reply [socket message])
+(defn handle-reply [socket message]
+  (let [status (get-in message [:payload :status])
+        response (get-in message [:payload :response])
+        ref (:ref message)
+        push (get-in socket [:pushes ref])
+        on-ok (:on-ok push)
+        on-error (:on-error push)]
+    (match [status]
+           ["ok"] {:type :external-msg :content (on-ok response)}
+           ["error"] {:type :external-msg :content (on-error response)}
+           :else {:type :no-op})))
 
 (defn map-external-msgs [socket msg]
   (if (nil? msg)
@@ -150,7 +173,7 @@
            ["phx_error"] (let [channel (get-in socket [:channels (:topic msg)])
                                on-error (:on-error channel)]
                            {:type :external-msg :content (on-error (:payload msg))})
-           ["pgx_close"] (let [channel (get-in socket [:channels (:topic msg)])
+           ["phx_close"] (let [channel (get-in socket [:channels (:topic msg)])
                                on-close (:on-close channel)]
                            {:type :external-msg :content (on-close (:payload msg))})
            :else {:type :no-op})))
@@ -163,6 +186,11 @@
     (if (nil? event)
       {:type :no-op}
       {:type :external-msg :content (:payload msg)})))
+
+(defn listen [f socket]
+  (map f [(internal-msgs socket)
+          (external-msgs socket)
+          (heartbeat-sub socket)]))
 
 
 (defn fmap [f socket]

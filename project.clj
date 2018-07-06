@@ -6,5 +6,6 @@
   :dependencies [[org.clojure/clojure "1.9.0"]
                  [org.clojure/core.match "0.3.0-alpha5"]
                  [org.clojure/data.json "0.2.6"]
-                 [http-kit "2.3.0"]
-                 [overtone/at-at "1.2.0"]])
+                 [overtone/at-at "1.2.0"]
+                 [aleph "0.4.6"]
+                 [manifold "0.1.8"]])

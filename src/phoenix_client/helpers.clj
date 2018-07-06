@@ -14,11 +14,7 @@
 (defrecord Message [event topic payload])
 
 (defn make-message [event topic payload & [ref]]
-  (merge (->Message event topic payload)
-         {:event event
-          :topic topic
-          :payload payload
-          :ref ref}))
+  (merge (->Message event topic payload) {:ref ref}))
 
 (defn encode-message [msg]
   (json/write-str msg))

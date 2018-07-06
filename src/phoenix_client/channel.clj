@@ -19,7 +19,7 @@
    :on-join identity
    :on-join-error identity
    :join-ref -1
-   :lave-ref -1})
+   :leave-ref -1})
 
 (defn on-error [channel f]
   (assoc channel :on-error f))
@@ -40,4 +40,3 @@
         (update-in [:on-error] (transform))
         (update-in [:on-join] (transform))
         (update-in [:on-join-error] (transform)))))
-

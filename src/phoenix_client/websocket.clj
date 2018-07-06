@@ -1,15 +1,25 @@
 (ns phoenix-client.websocket
-  (:require [org.httpkit.client :as http]))
+  (:require [aleph.http :as http]
+            [manifold.stream :as s]))
+
+(defonce socket (atom nil))
+
+@socket
+
+(defn get-socket [path]
+  (if (or (nil? @socket) (s/closed? @socket))
+    (let [conn @(http/websocket-client path)]
+      (reset! socket conn)
+      conn)
+    @socket))
 
 (defn emit [path json]
-  (let [options {:body json
-                 :content-type "application/json"
-                 :timeout 200
-                 :keep-alive true}]
-    (http/post path options (fn [res] (prn res)))))
+  (let [conn (get-socket path)]
+    (s/put! conn json)))
 
 (defn listen [path cb]
-  (let [options {:timeout 200
-                 :keep-alive true}]
-    (http/get path options (fn [res] (prn res) (cb res)))))
-
+  (let [conn (get-socket path)]
+    (s/consume (fn [res]
+                 (println "incoming: " res)
+                 (cb res))
+               conn)))
