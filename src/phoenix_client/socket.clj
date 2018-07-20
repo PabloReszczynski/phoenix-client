@@ -2,10 +2,12 @@
   (:require [phoenix-client.push :refer [make-push] :as p]
             [phoenix-client.channel :as ch]
             [phoenix-client.helpers :refer [make-message encode-message decode-message]]
-            [phoenix-client.websocket :as ws]
+            [phoenix-client.transports.core :as transports]
+            [phoenix-client.transports.websocket :as ws]
             [clojure.spec.alpha :as s]
             [clojure.core.match :refer [match]]
-            [overtone.at-at :refer [mk-pool every]]))
+            [overtone.at-at :refer [mk-pool every]]
+            [phoenix-client.helpers :refer [make-message encode-message decode-message]]))
 
 (def timer-pool (mk-pool))
 
@@ -21,64 +23,99 @@
     :receive-reply
     :heartbeat})
 
+(s/def ::endpoint string?)
+(s/def ::debug boolean?)
+(s/def ::channels (s/keys string? ::ch/channel))
+(s/def ::events (s/keys (s/cat string? string?) fn?))
+(s/def ::pushes (s/keys int? ::p/push))
+(s/def ::ref int?)
+(s/def ::heartbeat-interval-seconds float?)
+(s/def ::without-heartbeat boolean?)
+
+(s/def ::socket
+  (s/keys :req-un [::endpoint
+                   ::debug
+                   ::channels
+                   ::events
+                   ::pushes
+                   ::ref
+                   ::heartbeat-interval-seconds
+                   ::without-heartbeat]))
+
 (def default-timeout 10000)
 (def ws-close-normal 1000)
 
-(defn make-socket [endpoint]
-  {:endpoint endpoint
-   :ref 0
-   :heartbeat-interval-seconds 30})
+(def default-params
+  {:debug false
+   :heartbeat-interval-seconds 30
+   :without-heartbeat false
+   :transport (ws/make-websocket)})
 
-(defn send-message! [path message]
-  (ws/emit path (encode-message message)))
+(defn make-socket [endpoint & opts]
+  (merge default-params
+         (first opts)
+         {:endoint endpoint
+          :channels {}
+          :events {}
+          :pushes {}
+          :ref 0}))
 
-(defn emit! [{:keys [endpoint ref]} event channel payload]
-  (send-message! endpoint (make-message event channel payload ref)))
+(defn send-message! [path message transport]
+  (transports/emit! transport path (encode-message message)))
+
+(defn emit! [{:keys [endpoint ref transport]} event channel payload]
+  (send-message! endpoint (make-message event channel payload ref) transport))
 
 (defn push [pusheable socket]
   (let [socket (-> socket
-                  (update-in [:pushes] assoc (:ref socket) pusheable)
-                  (update-in [:ref] inc))]
-     (emit! socket
-            (:event pusheable)
-            (:channel pusheable)
-            (:payload pusheable))
-     socket))
+                   (update-in [:pushes] assoc (:ref socket) pusheable)
+                   (update-in [:ref] inc))]
+    (emit! socket
+           (:event pusheable)
+           (:channel pusheable)
+           (:payload pusheable))
+    socket))
 
-(defn on-channel-errored [channel-name socket]
-  [(update-in socket [:channels channel-name] assoc :state :errored)
-   nil])
+(defprotocol UpdateSocket
+  (update-socket [this socket]))
 
-(defn on-channel-closed [channel-name socket]
-  (let [channel (get-in socket [:channels channel-name])]
-    (if (nil? channel)
-      [socket nil]
-      [(-> socket
-           (update-in [:channels channel-name] assoc :state :closed)
-           (update-in [:pushes] dissoc (:join-ref channel)))
-       nil])))
+(defrecord ChannelJoined [content]
+  UpdateSocket
+  (update-socket [this socket]
+    (let [channel-name (:content this)
+          channel (get-in socket [:channels channel-name])]
+      (if-not (nil? channel)
+        (-> socket
+            (update-in [:channels channel-name] assoc :state :closed)
+            (update-in [:pushes] dissoc (:join-ref channel)))
+        socket))))
 
-(defn on-channel-joined [channel-name socket]
-  (let [channel (get-in socket [:channels channel-name])]
-    (if (nil? channel)
-      [socket nil]
-      [(-> socket
-           (update-in [:channels channel-name] assoc :state :joined)
-           (update-in [:pushes] dissoc (:join-ref channel)))
-       nil])))
+(defrecord ChannelErrored [content]
+  UpdateSocket
+  (update-socket [this socket]
+    (let [channel-name (:content this)]
+      (update-in socket [:channels channel-name] assoc :state :errored))))
 
+(defrecord ChannelClosed [content]
+  UpdateSocket
+  (update-socket [this socket]
+    (let [channel-name (:content this)
+          channel (get-in socket [:channels channel-name])]
+      (if-not (nil? channel)
+        (-> socket
+            (update-in [:channels channel-name] assoc :state :closed)
+            (update-in [:pushes] dissoc (:join-ref channel)))
+        socket))))
+
+(defrecord ExternalMsg [content])
+
+(defrecord NoOp []
+  UpdateSocket
+  (update-socket [this socket] socket))
 
 (defn on-heartbeat [socket]
   (let [pusheable (make-push "heartbeat" "phoenix")]
     (push pusheable socket)))
-
-(defn update-socket [{:keys [content type]} socket]
-  (match [type]
-         [:channel-errored] (on-channel-errored content socket)
-         [:channel-closed] (on-channel-closed content socket)
-         [:channel-joined] (on-channel-joined content socket)
-         [:heartbeat] (on-heartbeat socket)
-         :else [socket nil]))
 
 (defn join-channel [channel socket]
   (let [pusheable (make-push "phx_join"
@@ -91,37 +128,41 @@
         socket (update-in socket [:channels] assoc (:name channel) channel)]
     (push pusheable socket)))
 
-(defn join [channel socket]
-  (let [state (get-in socket [:channels (:name channel) :state])]
-    (if (nil? state)
-      (join-channel channel socket)
-      (if (or (= state :joined) (= state :joining))
-        [socket nil]))))
+(defn join [channel]
+  (fn [socket]
+    (let [state (get-in socket [:channels (:name channel) :state])]
+      (if (nil? state)
+        (join-channel channel socket)
+        (if (or (= state :joined) (= state :joining))
+          socket)))))
 
-(defn leave [channel-name socket]
-  (let [channel (get-in socket [:channels channel-name])]
-    (if (nil? channel)
-      (if (or (= (:state channel) :joining) (= (:state channel) :joined))
-        (let [pusheable (make-push "phx_leave" channel-name)
-              channel (merge channel {:state :leaving
-                                      :leave-ref (:ref socket)})
-              socket (assoc-in socket [:channels channel-name] channel)]
-          (push pusheable))
-        [socket nil])
-      [socket nil])))
+(defn leave [channel-name]
+  (fn [socket]
+    (let [channel (get-in socket [:channels channel-name])]
+      (if (nil? channel)
+        (if (or (= (:state channel) :joining) (= (:state channel) :joined))
+          (let [pusheable (make-push "phx_leave" channel-name)
+                channel (merge channel {:state :leaving
+                                        :leave-ref (:ref socket)})
+                socket (assoc-in socket [:channels channel-name] channel)]
+            (push pusheable))
+          socket)
+        socket))))
 
 (defn heartbeat [socket]
   (let [pusheable (make-push "heartbeat" "phoenix")]
     (push pusheable socket)))
 
-(defn on [event-name channel-name on-receive socket]
-  (assoc-in socket [:events [event-name channel-name]] on-receive))
+(defn on [event-name channel-name on-receive]
+  (fn [socket]
+    (assoc-in socket [:events [event-name channel-name]] on-receive)))
 
-(defn off [event-name channel-name socket]
-  (update-in socket [:events] dissoc [event-name channel-name]))
+(defn off [event-name channel-name]
+  (fn [socket]
+    (update-in socket [:events] dissoc [event-name channel-name])))
 
 (defn phoenix-messages [socket]
-  @(ws/listen (:endpoint socket) decode-message))
+  (transports/listen! (:transport socket) (:endpoint socket) decode-message))
 
 (defn heartbeat-sub [socket]
   (every (* 1000 (:heartbeat-interval-seconds socket))
@@ -135,20 +176,27 @@
         channel (get-in socket [:channels topic])]
     (if (= status "ok")
       (cond
-        (= ref (:join-ref channel)) {:type :channel-joined :content topic}
-        (= ref (:leave-ref channel)) {:type :channel-closed :content topic}
-        :else {:type :no-op})
-      {:type :no-op})))
+        (= ref (:join-ref channel)) (->ChannelJoined topic)
+        (= ref (:leave-ref channel)) (->ChannelClosed topic)
+        :else (->NoOp))
+      (->NoOp))))
 
-(defn map-internal-msgs [socket msg]
-  (if (nil? msg)
-    {:type :no-op}
-    (match [(:event msg)]
-           ["phx_reply"] (handle-internal-reply socket msg)
-           ["phx_error"] {:type :channel-errored :content (:topic msg)}
-           ["phx_close"] {:type :channel-closed :content (:topic msg)}
-           :else {:type :no-op})))
 
+(defmulti map-internal-msgs
+  (fn [socket msg]
+    (:event msg)))
+
+(defmethod map-internal-msgs "phx_reply" [socket msg]
+  (handle-internal-reply socket msg))
+
+(defmethod map-internal-msgs "phx_error" [socket msg]
+  (->ChannelErrored (:topic msg)))
+
+(defmethod map-internal-msgs "phx_close" [socket msg]
+  (->ChannelClosed (:topic msg)))
+
+(defmethod map-internal-msgs :default [socket msg]
+  (->NoOp))
 
 (defn internal-msgs [socket]
   (map (partial map-internal-msgs socket) (phoenix-messages socket)))
@@ -161,22 +209,33 @@
         on-ok (:on-ok push)
         on-error (:on-error push)]
     (match [status]
-           ["ok"] {:type :external-msg :content (on-ok response)}
-           ["error"] {:type :external-msg :content (on-error response)}
-           :else {:type :no-op})))
+           ["ok"] (->ExternalMsg (on-ok response))
+           ["error"] (->ExternalMsg (on-error response))
+           :else (->NoOp))))
 
-(defn map-external-msgs [socket msg]
-  (if (nil? msg)
-    {:type :no-op}
-    (match [(:event msg)]
-           ["phx_reply"] (handle-reply socket msg)
-           ["phx_error"] (let [channel (get-in socket [:channels (:topic msg)])
-                               on-error (:on-error channel)]
-                           {:type :external-msg :content (on-error (:payload msg))})
-           ["phx_close"] (let [channel (get-in socket [:channels (:topic msg)])
-                               on-close (:on-close channel)]
-                           {:type :external-msg :content (on-close (:payload msg))})
-           :else {:type :no-op})))
+(defmulti map-external-msgs
+  (fn [socket msg]
+    (:event msg)))
+
+(defmethod map-external-msgs "phx_reply"
+  [socket msg]
+  (handle-reply socket msg))
+
+(defmethod map-external-msgs "phx_error"
+  [socket msg]
+  (let [channel (get-in socket [:channels (:topic msg)])
+        on-error (:on-error channel)]
+    (->ExternalMsg (on-error (:payload msg)))))
+
+(defmethod map-external-msgs "phx_close"
+  [socket msg]
+  (let [channel (get-in socket [:channels (:topic msg)])
+        on-close (:on-close channel)]
+    (->ExternalMsg (on-close (:payload msg)))))
+
+(defmethod map-external-msgs :default
+  [socket msg]
+  (->NoOp))
 
 (defn external-msgs [socket]
   (map (partial map-external-msgs socket) (phoenix-messages socket)))
@@ -184,8 +243,8 @@
 (defn handle-event [socket msg]
   (let [event (get-in socket [:events [(:event msg) (:topic msg)]])]
     (if (nil? event)
-      {:type :no-op}
-      {:type :external-msg :content (:payload msg)})))
+      (->NoOp)
+      (->ExternalMsg (:payload msg)))))
 
 (defn listen [f socket]
   (map f [(internal-msgs socket)
