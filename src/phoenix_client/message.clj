@@ -1,4 +1,4 @@
-(ns phoenix-client.helpers
+(ns phoenix-client.message
   (:require [clojure.spec.alpha :as s]
             [clojure.data.json :as json]))
 

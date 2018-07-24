@@ -32,7 +32,8 @@
       (s/put! conn json)))
   (listen! [this path cb]
     (let [conn (get-socket this path)]
-      (s/consume cb conn))))
+      (s/consume cb conn)))
+  (close! [this] nil))
 
 (defn make-websocket []
   (->Websocket (atom nil)))

@@ -2,4 +2,5 @@
 
 (defprotocol Transport
   (emit! [transport path json])
-  (listen! [transport path cb]))
+  (listen! [transport path cb])
+  (close! [transport]))

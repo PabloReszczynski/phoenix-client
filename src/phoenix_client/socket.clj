@@ -1,13 +1,12 @@
 (ns phoenix-client.socket
   (:require [phoenix-client.push :refer [make-push] :as p]
             [phoenix-client.channel :as ch]
-            [phoenix-client.helpers :refer [make-message encode-message decode-message]]
+            [phoenix-client.message :refer [make-message encode-message decode-message]]
             [phoenix-client.transports.core :as transports]
             [phoenix-client.transports.websocket :as ws]
             [clojure.spec.alpha :as s]
             [clojure.core.match :refer [match]]
-            [overtone.at-at :refer [mk-pool every]]
-            [phoenix-client.helpers :refer [make-message encode-message decode-message]]))
+            [overtone.at-at :refer [mk-pool every]]))
 
 (def timer-pool (mk-pool))
 
@@ -54,7 +53,7 @@
 (defn make-socket [endpoint & opts]
   (merge default-params
          (first opts)
-         {:endoint endpoint
+         {:endpoint endpoint
           :channels {}
           :events {}
           :pushes {}
