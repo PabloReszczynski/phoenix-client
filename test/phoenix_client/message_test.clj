@@ -14,4 +14,9 @@
                 :topic "rooms:lobby"
                 :payload {:name "foo"
                           :message "bar"}
-                :ref nil})))
+                :ref nil}))
+  (is (= "{\"name\":\"foo\",\"message\":\"bar\"}"
+         (encode-message {:name "foo" :message "bar"})))
+
+  (is (= {:name "foo" :message "bar"}
+         (decode-message "{\"name\":\"foo\",\"message\":\"bar\"}"))))

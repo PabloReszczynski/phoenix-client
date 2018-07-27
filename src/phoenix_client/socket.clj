@@ -85,7 +85,7 @@
           channel (get-in socket [:channels channel-name])]
       (if-not (nil? channel)
         (-> socket
-            (update-in [:channels channel-name] assoc :state :closed)
+            (update-in [:channels channel-name] assoc :state :joined)
             (update-in [:pushes] dissoc (:join-ref channel)))
         socket))))
 
@@ -113,10 +113,10 @@
   (update-socket [this socket] socket))
 
 (defn on-heartbeat [socket]
-  (let [pusheable (make-push "heartbeat" "phoenix")]
+  (let [pusheable (make-push "heartbeat" "phoenix" {})]
     (push pusheable socket)))
 
-(defn join-channel [channel socket]
+(defn ^:private join-channel [channel socket]
   (let [pusheable (make-push "phx_join"
                              (:name channel)
                              (:payload channel)
@@ -124,29 +124,27 @@
                              (:on-join-error channel))
         channel (merge channel {:state :joining
                                 :join-ref (:ref socket)})
-        socket (update-in socket [:channels] assoc (:name channel) channel)]
+        socket (assoc-in socket [:channels (:name channel)] channel)]
     (push pusheable socket)))
 
-(defn join [channel]
-  (fn [socket]
-    (let [state (get-in socket [:channels (:name channel) :state])]
-      (if (nil? state)
-        (join-channel channel socket)
-        (if (or (= state :joined) (= state :joining))
-          socket)))))
-
-(defn leave [channel-name]
-  (fn [socket]
-    (let [channel (get-in socket [:channels channel-name])]
-      (if (nil? channel)
-        (if (or (= (:state channel) :joining) (= (:state channel) :joined))
-          (let [pusheable (make-push "phx_leave" channel-name)
-                channel (merge channel {:state :leaving
-                                        :leave-ref (:ref socket)})
-                socket (assoc-in socket [:channels channel-name] channel)]
-            (push pusheable))
-          socket)
+(defn join [socket channel]
+  (let [state (get-in socket [:channels (:name channel) :state])]
+    (if (nil? state)
+      (join-channel channel socket)
+      (if (or (= state :joined) (= state :joining))
         socket))))
+
+(defn leave [socket channel-name]
+  (let [channel (get-in socket [:channels channel-name])]
+    (if (nil? channel)
+      (if (or (= (:state channel) :joining) (= (:state channel) :joined))
+        (let [pusheable (make-push "phx_leave" channel-name)
+              channel (merge channel {:state :leaving
+                                      :leave-ref (:ref socket)})
+              socket (assoc-in socket [:channels channel-name] channel)]
+          (push pusheable))
+        socket)
+      socket)))
 
 (defn heartbeat [socket]
   (let [pusheable (make-push "heartbeat" "phoenix")]

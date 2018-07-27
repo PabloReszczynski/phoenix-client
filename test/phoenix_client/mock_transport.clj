@@ -5,7 +5,7 @@
 (defrecord MockTransport [queue]
   Transport
   (emit! [this _ json]
-    (async/>!! (:queue this) json)
+    (async/go (async/>! (:queue this) json))
     this)
   (listen! [this _ cb]
     (async/go-loop []
@@ -19,4 +19,3 @@
 
 (defn make-mock-transport []
   (->MockTransport (async/chan)))
-
